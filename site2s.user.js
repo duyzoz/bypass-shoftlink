@@ -3,7 +3,7 @@
 // @namespace    https://site2s.com/
 // @version      2.0.0
 // @description  Auto bypass Site2S shortlinks with 3D Floating UI
-// @author       Triva
+// @author       Tris
 // @match        *://site2s.com/*
 // @match        *://*.site2s.com/*
 // @match        *://traffic2s.com/*
