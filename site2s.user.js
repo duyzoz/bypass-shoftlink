@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Site2S Bypass Pro 3D
 // @namespace    https://site2s.com/
-// @version      2.1.1
-// @description  Auto bypass Site2S shortlinks (98sub Captcha & Promo Code modes) with 3D Floating UI
+// @version      2.2.0
+// @description  Auto bypass Site2S shortlinks (Direct Token, 98sub Captcha & Promo Code modes) with 3D Floating UI
 // @author       KhanhDev
 // @match        *://site2s.com/*
 // @match        *://*.site2s.com/*
@@ -21,10 +21,14 @@
     'use strict';
 
     const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const SITE2S_API_TOKEN = '82ff42862b0f873c5943b15ae821952c';
 
     let ui = null;
     let isRunning = false;
+    let isFinishingToken = false;
+    let emptyTokenRetryCount = 0;
     let currentTask = null;
+    let lastIpInfo = null;
     let resolvedClientIp = '';
     let resolvedIpVariants = [];
     let activePollTimer = null;
@@ -73,43 +77,69 @@
             }
         };
 
-        if (fallbackIp) addIp(fallbackIp);
+        const cleanFallback = (fallbackIp && typeof fallbackIp === 'string' && fallbackIp.trim() !== 'unknown' && fallbackIp.trim() !== 'UNKNOWN')
+            ? fallbackIp.trim()
+            : '';
+        if (cleanFallback) addIp(cleanFallback);
 
-        const [traceTxt, ipifyTxt] = await Promise.all([
+        const [traceTxt, ipifyTxt, ipify64Txt] = await Promise.all([
             gmFetchText('https://one.one.one.one/cdn-cgi/trace'),
-            gmFetchText('https://api.ipify.org?format=json')
+            gmFetchText('https://api.ipify.org?format=json'),
+            gmFetchText('https://api64.ipify.org?format=json')
         ]);
 
+        let traceIp = '';
         let ipv4 = '';
         let ipv6 = '';
-
-        if (ipifyTxt) {
-            try {
-                const parsed = JSON.parse(ipifyTxt);
-                if (parsed && parsed.ip) {
-                    ipv4 = parsed.ip.trim();
-                    addIp(ipv4);
-                }
-            } catch (e) {}
-        }
 
         if (traceTxt) {
             const line = traceTxt.split('\n').find((l) => l.startsWith('ip='));
             if (line) {
-                const traceIp = line.slice(3).trim();
+                traceIp = line.slice(3).trim();
                 if (traceIp) {
                     if (traceIp.includes(':')) ipv6 = traceIp;
-                    else if (!ipv4) ipv4 = traceIp;
+                    else ipv4 = traceIp;
                     addIp(traceIp);
                 }
             }
         }
 
-        const primary = ipv4 || fallbackIp || ipv6 || variants[0] || '127.0.0.1';
+        if (ipifyTxt) {
+            try {
+                const parsed = JSON.parse(ipifyTxt);
+                if (parsed && parsed.ip) {
+                    const v4 = parsed.ip.trim();
+                    if (v4 && !v4.includes(':')) ipv4 = v4;
+                    addIp(v4);
+                }
+            } catch (e) {}
+        }
+
+        if (ipify64Txt) {
+            try {
+                const parsed64 = JSON.parse(ipify64Txt);
+                if (parsed64 && parsed64.ip) {
+                    const v64 = parsed64.ip.trim();
+                    if (v64.includes(':') && !ipv6) ipv6 = v64;
+                    else if (!v64.includes(':') && !ipv4) ipv4 = v64;
+                    addIp(v64);
+                }
+            } catch (e) {}
+        }
+
+        if (cleanFallback) {
+            if (cleanFallback.includes(':') && !ipv6) ipv6 = cleanFallback;
+            else if (!cleanFallback.includes(':') && !ipv4) ipv4 = cleanFallback;
+        }
+
+        const primary = cleanFallback || traceIp || ipv6 || ipv4 || variants[0] || '127.0.0.1';
         addIp(primary);
+        if (ipv6) addIp(ipv6);
+        if (ipv4) addIp(ipv4);
 
         return {
             clientIp: primary,
+            traceIp,
             ipv4,
             ipv6,
             variants
@@ -182,7 +212,7 @@
         const tokenMatch = html.match(/const\s+token\s*=\s*"([^"]*)"/);
         const ipVarMatch = html.match(/const\s+ipVariants\s*=\s*(\[[^\]]*\])/);
         const statusVal = statusMatch ? statusMatch[1] : '';
-        const tokenVal = tokenMatch ? tokenMatch[1] : '';
+        const tokenVal = tokenMatch ? tokenMatch[1].trim() : '';
         let pageIpVariants = [];
         if (ipVarMatch) {
             try {
@@ -190,8 +220,9 @@
             } catch (e) {}
         }
 
+        const mergedVariants = [...new Set([...(parentVariants || []), ...(pageIpVariants || [])])];
+
         if (statusVal === 'success' && tokenVal) {
-            const mergedVariants = [...new Set([...(parentVariants || []), ...(pageIpVariants || [])])];
             window.parent.postMessage({
                 type: 'BV_SITE2S_TOKEN',
                 token: tokenVal,
@@ -219,12 +250,38 @@
             return;
         }
 
+        if (statusVal === 'success' && !tokenVal) {
+            window.parent.postMessage({
+                type: 'BV_98SUB_EMPTY_TOKEN',
+                targetOrigin: targetRef,
+                ipVariants: mergedVariants
+            }, '*');
+
+            const interceptEmpty = setInterval(() => {
+                const btn = document.getElementById('btn_getlink');
+                if (btn && !btn.dataset.bvHooked) {
+                    btn.dataset.bvHooked = '1';
+                    btn.addEventListener('click', (ev) => {
+                        ev.preventDefault();
+                        ev.stopImmediatePropagation();
+                        window.parent.postMessage({
+                            type: 'BV_98SUB_EMPTY_TOKEN',
+                            targetOrigin: targetRef,
+                            ipVariants: mergedVariants
+                        }, '*');
+                    }, true);
+                }
+            }, 300);
+            setTimeout(() => clearInterval(interceptEmpty), 120000);
+            return;
+        }
+
         let ipReady = false;
         let syncedClientIp = parentIp;
-        let syncedVariants = Array.isArray(parentVariants) && parentVariants.length ? parentVariants : [];
+        let syncedVariants = Array.isArray(parentVariants) && parentVariants.length ? [...parentVariants] : [];
 
         fetchBothIpVersions(parentIp).then((ipInfo) => {
-            syncedClientIp = ipInfo.clientIp || parentIp;
+            syncedClientIp = parentIp || ipInfo.traceIp || ipInfo.ipv6 || ipInfo.clientIp || '';
             syncedVariants = [...new Set([...syncedVariants, ...ipInfo.variants])];
             ipReady = true;
             applyFormInputs();
@@ -233,12 +290,25 @@
         function applyFormInputs() {
             const clientIpEl = document.getElementById('client_ip') || document.querySelector('input[name="client_ip"]');
             const ipVarEl = document.getElementById('ip_variants') || document.querySelector('input[name="ip_variants"]');
-            if (clientIpEl && syncedClientIp) {
-                clientIpEl.value = syncedClientIp;
+
+            if (clientIpEl) {
+                const existingIp = (clientIpEl.value || '').trim();
+                if (existingIp && existingIp !== 'UNKNOWN' && !syncedVariants.includes(existingIp)) {
+                    syncedVariants.unshift(existingIp);
+                }
+                if (parentIp) {
+                    clientIpEl.value = parentIp;
+                } else if (existingIp && existingIp.includes(':')) {
+                    clientIpEl.value = existingIp;
+                } else if (syncedClientIp) {
+                    clientIpEl.value = syncedClientIp;
+                }
             }
+
             if (ipVarEl && syncedVariants.length > 0) {
-                ipVarEl.value = JSON.stringify(syncedVariants);
+                ipVarEl.value = JSON.stringify([...new Set(syncedVariants)]);
             }
+
             if (targetRef) {
                 const wwwInput = document.querySelector('input[name="www"]');
                 const origInput = document.querySelector('input[name="original_referer"]');
@@ -630,7 +700,7 @@
                                 <div class="bv-cube-face bv-face-bottom"></div>
                             </div>
                         </div>
-                        <span id="bv-floating-title">SITE2S 3D v2.1</span>
+                        <span id="bv-floating-title">SITE2S 3D v2.2</span>
                     </div>
                     <button id="bv-floating-toggle" title="Thu gon / Mo rong">-</button>
                 </div>
@@ -1046,6 +1116,85 @@
         return { status: res.status, data, text };
     }
 
+    async function callGetTokenDirect(targetOrigin, rawJobtfHttp, ipInfo, ipVariants) {
+        const wwwCandidates = [];
+        const addWww = (w) => {
+            if (!w || typeof w !== 'string') return;
+            const clean = w.trim();
+            if (clean && !wwwCandidates.includes(clean)) wwwCandidates.push(clean);
+        };
+        addWww(rawJobtfHttp);
+        addWww(targetOrigin);
+        if (targetOrigin) {
+            addWww(targetOrigin.replace(/\/+$/, ''));
+        }
+
+        const ipCandidates = [];
+        const addIpCandidate = (ip) => {
+            if (!ip || typeof ip !== 'string') return;
+            const clean = ip.trim();
+            if (!clean || clean === 'unknown' || clean === 'UNKNOWN' || clean.startsWith('::ffff:')) return;
+            if (!ipCandidates.includes(clean)) ipCandidates.push(clean);
+        };
+
+        if (currentTask && currentTask.primaryIp) addIpCandidate(currentTask.primaryIp);
+        if (ipInfo) {
+            addIpCandidate(ipInfo.clientIp);
+            addIpCandidate(ipInfo.traceIp);
+            addIpCandidate(ipInfo.ipv6);
+            addIpCandidate(ipInfo.ipv4);
+        }
+        if (Array.isArray(ipVariants)) {
+            for (const v of ipVariants) addIpCandidate(v);
+        }
+
+        for (let wIdx = 0; wIdx < wwwCandidates.length; wIdx++) {
+            const www = wwwCandidates[wIdx];
+            for (let iIdx = 0; iIdx < ipCandidates.length; iIdx++) {
+                const ip = ipCandidates[iIdx];
+                try {
+                    const params = new URLSearchParams({
+                        token: SITE2S_API_TOKEN,
+                        ip: ip,
+                        www: www
+                    });
+                    const res = await fetch('/rest/gettoken?' + params.toString(), {
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: {
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        }
+                    });
+                    const text = await res.text();
+                    let data = null;
+                    try {
+                        data = JSON.parse(text);
+                    } catch (e) {}
+
+                    if (data && data.status === 'success' && data.token) {
+                        return {
+                            ok: true,
+                            token: String(data.token).trim(),
+                            ip: ip,
+                            www: www,
+                            data: data
+                        };
+                    }
+
+                    if (data && data.debug && data.debug.jobtf_http) {
+                        const leaked = String(data.debug.jobtf_http).trim();
+                        addWww(leaked);
+                        addWww(normalizeOrigin(leaked));
+                    }
+                } catch (e) {}
+            }
+        }
+
+        return { ok: false, token: '' };
+    }
+
     function extractPromoCodeFromHtml(html) {
         if (!html) return null;
         const cleaned = html
@@ -1192,59 +1341,164 @@
         }, 300);
     }
 
-    async function finishWithToken(tokenVal, extraVariants) {
+    async function tryConnectAllIps(tokenVal, targetOrigin, primaryIp, ipVariants, tryAlternates) {
+        const candidates = [];
+        const addCand = (ip) => {
+            if (!ip || typeof ip !== 'string') return;
+            const clean = ip.trim();
+            if (!clean || clean.startsWith('::ffff:')) return;
+            if (!candidates.includes(clean)) candidates.push(clean);
+        };
+        addCand(primaryIp);
+        if (tryAlternates && Array.isArray(ipVariants)) {
+            for (const v of ipVariants) addCand(v);
+        }
+
+        let lastRes = null;
+        for (const ip of candidates) {
+            lastRes = await callConnect(tokenVal, targetOrigin, ip, ipVariants);
+            const d = lastRes && lastRes.data;
+            if (d && d.status === 'success' && d.urlrespone && d.urlrespone !== 'nolink_time') {
+                return lastRes;
+            }
+            if (d && d.debug && d.debug.jobtf_http) {
+                const fixedOrigin = normalizeOrigin(d.debug.jobtf_http);
+                if (fixedOrigin && fixedOrigin !== targetOrigin) {
+                    targetOrigin = fixedOrigin;
+                    lastRes = await callConnect(tokenVal, targetOrigin, ip, ipVariants);
+                    if (lastRes.data && lastRes.data.status === 'success' && lastRes.data.urlrespone && lastRes.data.urlrespone !== 'nolink_time') {
+                        return lastRes;
+                    }
+                }
+            }
+        }
+        return lastRes;
+    }
+
+    async function finishWithToken(tokenVal, extraVariants, sourceTag) {
+        if (!tokenVal || isFinishingToken) return;
+        isFinishingToken = true;
         createUI();
         ui.iframeWrap.style.display = 'none';
         let targetOrigin = normalizeOrigin(ui.urlInput.value || currentTask.targetOrigin);
+        const badgeLabel = sourceTag || '98sub';
 
         if (Array.isArray(extraVariants) && extraVariants.length > 0) {
             resolvedIpVariants = [...new Set([...resolvedIpVariants, ...extraVariants])];
         }
 
-        const maxAttempts = 40;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const remainingEst = Math.max(0, 78 - attempt * 2);
-            setStatus(
-                '<b style="color:#38bdf8;">Da lay Token 98sub!</b><br>' +
-                'Dang doi Server mo khoa link dich (lan ' + attempt + '/' + maxAttempts +
-                (remainingEst > 0 ? ' ~ con khoang ' + remainingEst + 's' : '') + ')...'
-            );
-            setProgress(Math.min(98, 55 + Math.round((attempt / maxAttempts) * 43)));
+        const redirectSuccess = (finalUrl) => {
+            setProgress(100);
+            ui.codeBadge.style.display = 'block';
+            ui.codeBadge.innerHTML = '<a href="' + finalUrl + '" target="_blank" style="color:#6ee7b7;text-decoration:underline;">' + finalUrl + '</a>';
+            setStatus('<b style="color:#4ade80;">Vuot link thanh cong! Dang chuyen huong...</b>');
+            setTimeout(() => {
+                window.location.href = finalUrl;
+            }, 350);
+        };
 
-            const connRes = await callConnect(tokenVal, targetOrigin, resolvedClientIp, resolvedIpVariants);
-            const d = connRes.data;
-
-            if (d && d.status === 'success' && d.urlrespone && d.urlrespone !== 'nolink_time') {
-                const finalUrl = d.urlrespone;
-                setProgress(100);
-                ui.codeBadge.style.display = 'block';
-                ui.codeBadge.innerHTML = '<a href="' + finalUrl + '" target="_blank" style="color:#6ee7b7;text-decoration:underline;">' + finalUrl + '</a>';
-                setStatus('<b style="color:#4ade80;">Vuot link thanh cong! Dang chuyen huong...</b>');
-                setTimeout(() => {
-                    window.location.href = finalUrl;
-                }, 400);
+        try {
+            const initialRes = await tryConnectAllIps(tokenVal, targetOrigin, resolvedClientIp, resolvedIpVariants, false);
+            const initData = initialRes && initialRes.data;
+            if (initData && initData.status === 'success' && initData.urlrespone && initData.urlrespone !== 'nolink_time') {
+                redirectSuccess(initData.urlrespone);
                 return;
             }
-
-            if (d && d.debug && d.debug.jobtf_http) {
-                const fixedOrigin = normalizeOrigin(d.debug.jobtf_http);
+            if (initData && initData.debug && initData.debug.jobtf_http) {
+                const fixedOrigin = normalizeOrigin(initData.debug.jobtf_http);
                 if (fixedOrigin && fixedOrigin !== targetOrigin) {
                     targetOrigin = fixedOrigin;
                     ui.urlInput.value = fixedOrigin;
                     ui.metaMode.textContent = fixedOrigin.replace(/\/$/, '');
-                    continue;
                 }
             }
 
-            await new Promise((r) => setTimeout(r, 2500));
-        }
+            const startTs = Date.now();
+            const totalWaitSec = 72;
+            let lastCheckSec = 0;
 
-        setStatus('<span style="color:#f87171;">Het thoi gian cho Server mo khoa link. Hay bam Khoi Dong Lai.</span>');
+            while (true) {
+                const elapsedSec = Math.floor((Date.now() - startTs) / 1000);
+                const remainingSec = Math.max(0, totalWaitSec - elapsedSec);
+                const pct = Math.min(98, 55 + Math.round((Math.min(elapsedSec, totalWaitSec) / totalWaitSec) * 42));
+                setProgress(pct);
+
+                if (remainingSec > 0) {
+                    setStatus(
+                        '<b style="color:#4ade80;">Da lay Token (' + badgeLabel + ')!</b><br>' +
+                        'Dang doi Server mo khoa link dich: <b style="color:#38bdf8;">con ' + remainingSec + 's</b>...'
+                    );
+                } else {
+                    setStatus(
+                        '<b style="color:#38bdf8;">Dang lay link dich tu Server...</b><br>' +
+                        'Da cho ' + elapsedSec + 's (dang dong bo IPv4/IPv6)...'
+                    );
+                }
+
+                const shouldCheckNow =
+                    (elapsedSec === 25 && lastCheckSec < 25) ||
+                    (elapsedSec === 50 && lastCheckSec < 50) ||
+                    (elapsedSec >= 58 && (elapsedSec - lastCheckSec) >= 3);
+
+                if (shouldCheckNow) {
+                    lastCheckSec = elapsedSec;
+                    const tryAll = elapsedSec >= 68;
+                    const connRes = await tryConnectAllIps(tokenVal, targetOrigin, resolvedClientIp, resolvedIpVariants, tryAll);
+                    const d = connRes && connRes.data;
+
+                    if (d && d.status === 'success' && d.urlrespone && d.urlrespone !== 'nolink_time') {
+                        redirectSuccess(d.urlrespone);
+                        return;
+                    }
+
+                    if (d && d.debug && d.debug.jobtf_http) {
+                        const fixedOrigin = normalizeOrigin(d.debug.jobtf_http);
+                        if (fixedOrigin && fixedOrigin !== targetOrigin) {
+                            targetOrigin = fixedOrigin;
+                            ui.urlInput.value = fixedOrigin;
+                            ui.metaMode.textContent = fixedOrigin.replace(/\/$/, '');
+                        }
+                    }
+                }
+
+                if (elapsedSec >= 105) {
+                    break;
+                }
+
+                await new Promise((r) => setTimeout(r, 1000));
+            }
+
+            setStatus('<span style="color:#f87171;">Het thoi gian cho Server mo khoa link. Hay bam Khoi Dong Lai.</span>');
+        } finally {
+            isFinishingToken = false;
+        }
+    }
+
+    function open98SubIframe(targetOrigin, clientIp, ipVariants, statusNote) {
+        setProgress(55);
+        setStatus(
+            (statusNote || ('Da bo qua Buoc 1 & dong bo IP (' + ipVariants.length + ' variants)!')) + '<br>' +
+            '<b style="color:#38bdf8">Hay tich Captcha 98sub ngay trong khung ben duoi</b>:'
+        );
+
+        const iframeUrl = 'https://98sub.net/site2s/captchaN.php?min=1&max=2&w=' +
+            encodeURIComponent(targetOrigin) +
+            '&v=0&original_referer=' +
+            encodeURIComponent(targetOrigin) +
+            '&bv_ip=' +
+            encodeURIComponent(clientIp) +
+            '&bv_variants=' +
+            encodeURIComponent(JSON.stringify(ipVariants)) +
+            '&_t=' + Date.now();
+        ui.iframeWrap.style.display = 'block';
+        ui.capIframe.src = iframeUrl;
     }
 
     async function runBypassFlow() {
         if (isRunning) return;
         isRunning = true;
+        isFinishingToken = false;
+        emptyTokenRetryCount = 0;
         createUI();
         ui.startBtn.disabled = true;
         ui.codeBadge.style.display = 'none';
@@ -1266,24 +1520,35 @@
             await ensureDeviceCookies();
 
             const ipInfo = await fetchBothIpVersions(currentTask.primaryIp);
+            lastIpInfo = ipInfo;
             resolvedClientIp = ipInfo.clientIp;
             resolvedIpVariants = ipInfo.variants;
 
             let targetOrigin = normalizeOrigin(ui.urlInput.value || currentTask.targetOrigin);
+            let rawJobtfHttp = '';
 
-            if (!targetOrigin) {
-                setStatus('Dang lay ten mien nhiem vu tu Server...');
-                setProgress(30);
-                const probeRes = await callConnect('test', 'https://probe.invalid/', resolvedClientIp, resolvedIpVariants);
-                if (probeRes.data && probeRes.data.debug && probeRes.data.debug.jobtf_http) {
-                    const leakedOrigin = normalizeOrigin(probeRes.data.debug.jobtf_http);
-                    if (leakedOrigin) {
-                        targetOrigin = leakedOrigin;
-                        currentTask.targetOrigin = leakedOrigin;
-                        ui.metaBox.style.display = 'block';
-                        ui.metaMode.textContent = leakedOrigin.replace(/\/$/, '');
-                        ui.urlInput.value = leakedOrigin;
-                    }
+            if (currentTask.hasStep1 && !currentTask.isCodeInputPage) {
+                setStatus('Dang bo qua Captcha 1 (/rest/getLinkCamp)...');
+                setProgress(32);
+                const campRes = await callGetLinkCamp(currentTask.alias, resolvedClientIp, resolvedIpVariants);
+                if (!campRes.data || campRes.data.status !== 'success') {
+                    const msg = (campRes.data && campRes.data.message) ? campRes.data.message : ('HTTP ' + campRes.status);
+                    throw new Error('getLinkCamp that bai: ' + msg);
+                }
+            }
+
+            setStatus('Dang lay thong tin nhiem vu tu Server...');
+            setProgress(42);
+            const probeRes = await callConnect('test', 'https://probe.invalid/', resolvedClientIp, resolvedIpVariants);
+            if (probeRes.data && probeRes.data.debug && probeRes.data.debug.jobtf_http) {
+                rawJobtfHttp = String(probeRes.data.debug.jobtf_http).trim();
+                const leakedOrigin = normalizeOrigin(rawJobtfHttp);
+                if (leakedOrigin) {
+                    targetOrigin = leakedOrigin;
+                    currentTask.targetOrigin = leakedOrigin;
+                    ui.metaBox.style.display = 'block';
+                    ui.metaMode.textContent = leakedOrigin.replace(/\/$/, '');
+                    ui.urlInput.value = leakedOrigin;
                 }
             }
 
@@ -1305,32 +1570,8 @@
 
                 setStatus(
                     '<span style="color:#fbbf24;">Khong tim thay ma tinh tren ' + targetOrigin.replace(/\/$/, '') + '.</span><br>' +
-                    'Dang mo Captcha 98sub du phong hoac bam <b style="color:#fb923c;">Doi Nhiem Vu</b>.'
+                    'Dang thu lay Token truc tiep hoac mo Captcha 98sub...'
                 );
-            }
-
-            if (currentTask.hasStep1) {
-                setStatus('Dang bo qua Captcha 1 (/rest/getLinkCamp)...');
-                setProgress(40);
-                const campRes = await callGetLinkCamp(currentTask.alias, resolvedClientIp, resolvedIpVariants);
-                if (!campRes.data || campRes.data.status !== 'success') {
-                    const msg = (campRes.data && campRes.data.message) ? campRes.data.message : ('HTTP ' + campRes.status);
-                    throw new Error('getLinkCamp that bai: ' + msg);
-                }
-            }
-
-            if (!targetOrigin) {
-                const probeRes = await callConnect('test', 'https://probe.invalid/', resolvedClientIp, resolvedIpVariants);
-                if (probeRes.data && probeRes.data.debug && probeRes.data.debug.jobtf_http) {
-                    const leakedOrigin = normalizeOrigin(probeRes.data.debug.jobtf_http);
-                    if (leakedOrigin) {
-                        targetOrigin = leakedOrigin;
-                        currentTask.targetOrigin = leakedOrigin;
-                        ui.metaBox.style.display = 'block';
-                        ui.metaMode.textContent = leakedOrigin.replace(/\/$/, '');
-                        ui.urlInput.value = leakedOrigin;
-                    }
-                }
             }
 
             if (!targetOrigin) {
@@ -1338,22 +1579,18 @@
             }
             ui.urlInput.value = targetOrigin;
 
-            setProgress(55);
-            setStatus(
-                'Da bo qua Buoc 1 & dong bo IP (' + resolvedIpVariants.length + ' variants)!<br>' +
-                '<b style="color:#38bdf8">Hay tich Captcha 98sub ngay trong khung ben duoi</b>:'
-            );
+            setStatus('Dang thu lay Token truc tiep (/rest/gettoken)...');
+            setProgress(50);
+            const directTokenRes = await callGetTokenDirect(targetOrigin, rawJobtfHttp, ipInfo, resolvedIpVariants);
+            if (directTokenRes.ok && directTokenRes.token) {
+                if (directTokenRes.ip) {
+                    resolvedClientIp = directTokenRes.ip;
+                }
+                await finishWithToken(directTokenRes.token, resolvedIpVariants, 'Truc Tiep');
+                return;
+            }
 
-            const iframeUrl = 'https://98sub.net/site2s/captchaN.php?min=1&max=2&w=' +
-                encodeURIComponent(targetOrigin) +
-                '&v=0&original_referer=' +
-                encodeURIComponent(targetOrigin) +
-                '&bv_ip=' +
-                encodeURIComponent(resolvedClientIp) +
-                '&bv_variants=' +
-                encodeURIComponent(JSON.stringify(resolvedIpVariants));
-            ui.iframeWrap.style.display = 'block';
-            ui.capIframe.src = iframeUrl;
+            open98SubIframe(targetOrigin, resolvedClientIp, resolvedIpVariants);
         } catch (err) {
             setProgress(null);
             setStatus('<span style="color:#f87171;">Loi: ' + (err && err.message ? err.message : String(err)) + '</span>');
@@ -1363,7 +1600,7 @@
         }
     }
 
-    window.addEventListener('message', (e) => {
+    window.addEventListener('message', async (e) => {
         if (!e.data) return;
         if (e.data.type === 'BV_98SUB_SUBMITTING') {
             setStatus('<b style="color:#38bdf8;">Da nhan Captcha 98sub! Dang lay Token...</b>');
@@ -1371,7 +1608,42 @@
             return;
         }
         if (e.data.type === 'BV_SITE2S_TOKEN' && e.data.token) {
-            finishWithToken(e.data.token, e.data.ipVariants);
+            finishWithToken(e.data.token, e.data.ipVariants, '98sub');
+            return;
+        }
+        if (e.data.type === 'BV_98SUB_EMPTY_TOKEN') {
+            if (Array.isArray(e.data.ipVariants) && e.data.ipVariants.length > 0) {
+                resolvedIpVariants = [...new Set([...resolvedIpVariants, ...e.data.ipVariants])];
+            }
+            const targetOrigin = normalizeOrigin(ui.urlInput.value || e.data.targetOrigin || (currentTask && currentTask.targetOrigin));
+            setStatus('<b style="color:#fbbf24;">98sub tra ve Token trong! Dang lay Token truc tiep tu Server...</b>');
+            const directRes = await callGetTokenDirect(targetOrigin, targetOrigin, lastIpInfo, resolvedIpVariants);
+            if (directRes.ok && directRes.token) {
+                if (directRes.ip) resolvedClientIp = directRes.ip;
+                finishWithToken(directRes.token, resolvedIpVariants, 'Truc Tiep');
+                return;
+            }
+
+            if (emptyTokenRetryCount < 2) {
+                emptyTokenRetryCount++;
+                const altIp = (lastIpInfo && resolvedClientIp.includes(':') && lastIpInfo.ipv4)
+                    ? lastIpInfo.ipv4
+                    : ((lastIpInfo && !resolvedClientIp.includes(':') && lastIpInfo.ipv6) ? lastIpInfo.ipv6 : resolvedClientIp);
+                resolvedClientIp = altIp;
+                if (currentTask && currentTask.hasStep1 && currentTask.alias) {
+                    try {
+                        await callGetLinkCamp(currentTask.alias, resolvedClientIp, resolvedIpVariants);
+                    } catch (err) {}
+                }
+                open98SubIframe(
+                    targetOrigin,
+                    resolvedClientIp,
+                    resolvedIpVariants,
+                    '<span style="color:#fbbf24;">Da dong bo lai IP (' + resolvedClientIp + ')!</span>'
+                );
+            } else {
+                setStatus('<span style="color:#f87171;">98sub khong cap Token. Hay bam Khoi Dong Lai hoac Doi Nhiem Vu.</span>');
+            }
         }
     });
 
