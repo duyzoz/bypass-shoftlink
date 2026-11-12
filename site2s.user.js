@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Site2S Bypass Pro 3D
 // @namespace    https://site2s.com/
-// @version      2.2.1
+// @version      2.2.2
 // @description  Auto bypass Site2S shortlinks (Direct Token, 98sub Captcha & Promo Code modes) with 3D Floating UI. Auto-detects the task domain from the task image via OCR when the keyword contains no domain.
 // @author       KhanhDev
 // @match        *://site2s.com/*
@@ -701,7 +701,7 @@
                                 <div class="bv-cube-face bv-face-bottom"></div>
                             </div>
                         </div>
-                        <span id="bv-floating-title">SITE2S 3D v2.2.1</span>
+                        <span id="bv-floating-title">SITE2S 3D v2.2.2</span>
                     </div>
                     <button id="bv-floating-toggle" title="Thu gon / Mo rong">-</button>
                 </div>
@@ -1867,9 +1867,24 @@
             });
         }
 
-        ui.startBtn.addEventListener('click', () => {
-            runBypassFlow();
-        });
+        // v2.2.2: trang traffic2s.com chi la trang huong dan — flow bypass
+        // (getLinkCamp/token/98sub) chi chay tren site2s.com, nen nut Khoi Dong
+        // Lai o day truoc gio la no-op. Doi no thanh buoc tiep theo that: mo
+        // Google tim tu khoa (click chuot = user gesture nen khong bi chan
+        // popup), bro bam ket qua web nhiem vu roi lam nhiem vu nhu huong dan.
+        if (window.location.hostname.includes('traffic2s.com')) {
+            ui.startBtn.textContent = 'Tìm trên Google';
+            ui.startBtn.addEventListener('click', () => {
+                const kw = (currentTask.keyword || '').trim();
+                if (kw) {
+                    window.open('https://www.google.com/search?q=' + encodeURIComponent(kw), '_blank');
+                }
+            });
+        } else {
+            ui.startBtn.addEventListener('click', () => {
+                runBypassFlow();
+            });
+        }
 
         setTimeout(() => {
             runBypassFlow();
