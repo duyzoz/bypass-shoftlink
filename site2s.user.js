@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Site2S Bypass Pro 3D
 // @namespace    https://site2s.com/
-// @version      2.2.0
-// @description  Auto bypass Site2S shortlinks (Direct Token, 98sub Captcha & Promo Code modes) with 3D Floating UI
+// @version      2.2.1
+// @description  Auto bypass Site2S shortlinks (Direct Token, 98sub Captcha & Promo Code modes) with 3D Floating UI. Auto-detects the task domain from the task image via OCR when the keyword contains no domain.
 // @author       KhanhDev
 // @match        *://site2s.com/*
 // @match        *://*.site2s.com/*
@@ -28,6 +28,7 @@
     let isFinishingToken = false;
     let emptyTokenRetryCount = 0;
     let currentTask = null;
+    let domainResolvePromise = null;
     let lastIpInfo = null;
     let resolvedClientIp = '';
     let resolvedIpVariants = [];
@@ -700,7 +701,7 @@
                                 <div class="bv-cube-face bv-face-bottom"></div>
                             </div>
                         </div>
-                        <span id="bv-floating-title">SITE2S 3D v2.2</span>
+                        <span id="bv-floating-title">SITE2S 3D v2.2.1</span>
                     </div>
                     <button id="bv-floating-toggle" title="Thu gon / Mo rong">-</button>
                 </div>
@@ -947,6 +948,153 @@
             }
         }
         return '';
+    }
+
+    // v2.2.1: keyword dang cum tu tieng Viet (VD: "Vinhome Ky Hoa") khong chua
+    // domain — domain chi nam trong anh chup ket qua Google (img1). Doc no ra
+    // bang OCR (OCR.space, giong cach Link4m doc domain o buoc 3). Chi chap nhan
+    // domain khop voi tu khoa; khong khop thi tra '' — KHONG DOAN domain.
+    function stripDiacritics(s) {
+        let out = String(s || '');
+        try {
+            out = out.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        } catch (e) {
+            const map = { 'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'è': 'e', 'é': 'e', 'ê': 'e', 'ì': 'i', 'í': 'i', 'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ù': 'u', 'ú': 'u', 'û': 'u', 'ý': 'y', 'ă': 'a', 'đ': 'd', 'ơ': 'o', 'ư': 'u', 'À': 'A', 'Á': 'A', 'Â': 'A', 'Ã': 'A', 'È': 'E', 'É': 'E', 'Ê': 'E', 'Ì': 'I', 'Í': 'I', 'Ò': 'O', 'Ó': 'O', 'Ô': 'O', 'Õ': 'O', 'Ù': 'U', 'Ú': 'U', 'Û': 'U', 'Ý': 'Y', 'Ă': 'A', 'Đ': 'D', 'Ơ': 'O', 'Ư': 'U' };
+            out = out.split('').map((c) => map[c] || c).join('');
+        }
+        return out.replace(/đ/g, 'd').replace(/Đ/g, 'D');
+    }
+
+    function arrayBufferToBase64DataUrl(buf, mime) {
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        const CHUNK = 0x8000;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+        return 'data:' + (mime || 'image/png') + ';base64,' + btoa(bin);
+    }
+
+    function gmFetchBase64(url) {
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = (v) => { if (!done) { done = true; resolve(v); } };
+            setTimeout(() => finish(''), 15000);
+            const ext = (String(url).split('?')[0].match(/\.(png|jpe?g|gif|webp|bmp)$/i) || [])[1];
+            const mime = ext ? 'image/' + (ext.toLowerCase() === 'jpg' ? 'jpeg' : ext.toLowerCase()) : 'image/png';
+            if (typeof GM_xmlhttpRequest === 'function') {
+                try {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: url,
+                        responseType: 'arraybuffer',
+                        timeout: 15000,
+                        onload: function (res) {
+                            try {
+                                if (!res.response) { finish(''); return; }
+                                finish(arrayBufferToBase64DataUrl(res.response, mime));
+                            } catch (e) { finish(''); }
+                        },
+                        onerror: function () { finish(''); },
+                        ontimeout: function () { finish(''); }
+                    });
+                    return;
+                } catch (e) {}
+            }
+            if (typeof fetch === 'function') {
+                fetch(url).then((r) => r.arrayBuffer()).then((buf) => {
+                    try { finish(arrayBufferToBase64DataUrl(buf, mime)); } catch (e) { finish(''); }
+                }).catch(() => finish(''));
+                return;
+            }
+            finish('');
+        });
+    }
+
+    function gmPostForm(url, fields) {
+        const body = Object.keys(fields).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(fields[k])).join('&');
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = (v) => { if (!done) { done = true; resolve(v); } };
+            setTimeout(() => finish(''), 25000);
+            if (typeof GM_xmlhttpRequest === 'function') {
+                try {
+                    GM_xmlhttpRequest({
+                        method: 'POST',
+                        url: url,
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        data: body,
+                        timeout: 25000,
+                        onload: function (res) { finish(res.responseText || ''); },
+                        onerror: function () { finish(''); },
+                        ontimeout: function () { finish(''); }
+                    });
+                    return;
+                } catch (e) {}
+            }
+            if (typeof fetch === 'function') {
+                fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+                    .then((r) => r.text()).then((t) => finish(t)).catch(() => finish(''));
+                return;
+            }
+            finish('');
+        });
+    }
+
+    function extractDomainFromOcrText(text, keyword) {
+        if (!text) return '';
+        const BLOCKED = ['google.com', 'gstatic.com', 'googleapis.com', 'imgur.com', 'site2s.com', 'traffic2s.com', 'seo2s.com', 'facebook.com', 'youtube.com', 'youtu.be', 'zalo.me', 'telegram.me', 't.me', 'cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com', 'googletagmanager.com', 'googlesyndication.com'];
+        const isBlocked = (host) => BLOCKED.some((b) => host === b || host.endsWith('.' + b));
+        const compactKw = stripDiacritics(keyword || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const seen = [];
+        const re = /(?:https?:\/\/)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:\.[a-z]{2,})?)/gi;
+        let m;
+        let best = '';
+        let bestScore = 0;
+        while ((m = re.exec(text)) !== null) {
+            const host = (m[1] || '').toLowerCase().replace(/^www\./, '');
+            if (!host || isBlocked(host) || seen.includes(host)) continue;
+            seen.push(host);
+            const mainLabel = (host.split('.')[0] || '');
+            let score = 0;
+            if (compactKw && mainLabel) {
+                if (compactKw === mainLabel) {
+                    score += 100;
+                } else if (mainLabel.length >= 4 && (compactKw.includes(mainLabel) || mainLabel.includes(compactKw))) {
+                    score += 100;
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = host;
+            }
+        }
+        if (!best || bestScore <= 0) return '';
+        return 'https://' + best + '/';
+    }
+
+    function ocrImageToDomain(imageUrl, keyword) {
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = (v) => { if (!done) { done = true; resolve(v); } };
+            setTimeout(() => finish(''), 30000);
+            gmFetchBase64(imageUrl).then((b64) => {
+                if (!b64) { finish(''); return; }
+                gmPostForm('https://api.ocr.space/parse/image', {
+                    apikey: 'helloworld',
+                    base64Image: b64,
+                    OCREngine: '2',
+                    scale: 'true',
+                    isOverlayRequired: 'false'
+                }).then((raw) => {
+                    if (!raw) { finish(''); return; }
+                    let data = null;
+                    try { data = JSON.parse(raw); } catch (e) {}
+                    if (!data || data.OCRExitCode !== 1 || !Array.isArray(data.ParsedResults) || !data.ParsedResults[0]) { finish(''); return; }
+                    finish(extractDomainFromOcrText(data.ParsedResults[0].ParsedText || '', keyword));
+                }).catch(() => finish(''));
+            }).catch(() => finish(''));
+        });
     }
 
     function findSwitchTaskButton() {
@@ -1527,6 +1675,18 @@
             let targetOrigin = normalizeOrigin(ui.urlInput.value || currentTask.targetOrigin);
             let rawJobtfHttp = '';
 
+            // v2.2.1: doi OCR doc xong domain tu anh nhiem vu truoc khi bao loi.
+            if (!targetOrigin && domainResolvePromise) {
+                setStatus('Đang đọc domain từ ảnh nhiệm vụ (OCR)...');
+                const resolved = await domainResolvePromise;
+                if (resolved) {
+                    targetOrigin = normalizeOrigin(resolved);
+                    currentTask.targetOrigin = targetOrigin;
+                    ui.urlInput.value = targetOrigin;
+                    ui.metaMode.textContent = targetOrigin.replace(/\/$/, '');
+                }
+            }
+
             if (currentTask.hasStep1 && !currentTask.isCodeInputPage) {
                 setStatus('Dang bo qua Captcha 1 (/rest/getLinkCamp)...');
                 setProgress(32);
@@ -1653,7 +1813,9 @@
 
         createUI();
         ui.metaBox.style.display = 'block';
-        ui.metaMode.textContent = currentTask.targetOrigin ? currentTask.targetOrigin.replace(/\/$/, '') : 'Dang quet...';
+        ui.metaMode.textContent = currentTask.targetOrigin
+            ? currentTask.targetOrigin.replace(/\/$/, '')
+            : (currentTask.keyword && currentTask.imageUrl ? 'Đang đọc ảnh...' : 'Chưa xác định');
         ui.metaKw.textContent = currentTask.keyword || currentTask.alias || '-';
 
         if (currentTask.imageUrl) {
@@ -1663,6 +1825,33 @@
 
         if (currentTask.targetOrigin) {
             ui.urlInput.value = currentTask.targetOrigin;
+        }
+
+        // v2.2.1: keyword khong chua domain (VD: "Vinhome Ky Hoa") thi domain chi
+        // nam trong anh chup ket qua Google (img1) — doc no ra bang OCR, khong doan.
+        if (!currentTask.targetOrigin && currentTask.keyword && currentTask.imageUrl) {
+            domainResolvePromise = ocrImageToDomain(currentTask.imageUrl, currentTask.keyword)
+                .then((domain) => {
+                    if (!domain) {
+                        ui.metaMode.textContent = 'Chưa xác định';
+                        return '';
+                    }
+                    currentTask.targetOrigin = domain;
+                    ui.urlInput.value = domain;
+                    ui.metaMode.textContent = domain.replace(/\/$/, '');
+                    if (window.location.hostname.includes('traffic2s.com')) {
+                        setStatus(
+                            'Trang huong dan Traffic2S.<br>' +
+                            'Tu khoa: <b style="color:#38bdf8">' + (currentTask.keyword || '-') + '</b><br>' +
+                            'Web: <b style="color:#4ade80">' + domain.replace(/\/$/, '') + '</b>'
+                        );
+                    }
+                    return domain;
+                })
+                .catch(() => {
+                    ui.metaMode.textContent = 'Chưa xác định';
+                    return '';
+                });
         }
 
         const switchBtnEl = findSwitchTaskButton();
